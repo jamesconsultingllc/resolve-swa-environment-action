@@ -1,0 +1,223 @@
+name: 'Resolve Azure SWA Environment'
+description: 'Determine the target deployment slot and source environment based on branch name. Supports GitFlow and custom branch-to-slot mappings.'
+author: 'James Consulting LLC'
+branding:
+  icon: 'git-branch'
+  color: 'purple'
+
+inputs:
+  branch:
+    description: 'Branch name to resolve. If not provided, auto-detects from git or GITHUB_REF_NAME.'
+    required: false
+    default: ''
+  branch-mappings:
+    description: |
+      JSON object mapping branch patterns to environments. Supports glob patterns.
+      Default (GitFlow): {"main":"production","master":"production","develop":"development","release/*":"staging","feature/*":"$sanitized","hotfix/*":"$sanitized"}
+      Use "$sanitized" as value to auto-generate slot name from branch.
+    required: false
+    default: ''
+  parent-branch-mappings:
+    description: |
+      JSON object mapping branch patterns to their parent environment for source detection.
+      Default (GitFlow): {"feature/*":"development","hotfix/*":"production","release/*":"development"}
+    required: false
+    default: ''
+  detect-source:
+    description: 'Whether to detect the source environment (for copying settings). Set to false if only target is needed.'
+    required: false
+    default: 'true'
+
+outputs:
+  branch:
+    description: 'The resolved branch name'
+    value: ${{ steps.resolve.outputs.branch }}
+  target-environment:
+    description: 'The target environment/slot name for deployment'
+    value: ${{ steps.resolve.outputs.target_env }}
+  target-slot:
+    description: 'Alias for target-environment (for SWA deployment_environment)'
+    value: ${{ steps.resolve.outputs.target_env }}
+  source-environment:
+    description: 'The source environment to copy settings from'
+    value: ${{ steps.resolve.outputs.source_env }}
+  is-preview:
+    description: 'Whether this is a preview environment (feature/hotfix/release branch)'
+    value: ${{ steps.resolve.outputs.is_preview }}
+  is-production:
+    description: 'Whether this is the production environment'
+    value: ${{ steps.resolve.outputs.is_production }}
+  sanitized-branch:
+    description: 'The sanitized branch name (alphanumeric, lowercase, max 20 chars)'
+    value: ${{ steps.resolve.outputs.sanitized }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Resolve Environment
+      id: resolve
+      shell: bash
+      run: |
+        branch_input="${{ inputs.branch }}"
+        branch_mappings_input='${{ inputs.branch-mappings }}'
+        parent_mappings_input='${{ inputs.parent-branch-mappings }}'
+        detect_source="${{ inputs.detect-source }}"
+
+        # Default GitFlow mappings
+        default_branch_mappings='{
+          "main": "production",
+          "master": "production",
+          "develop": "development",
+          "release/*": "staging",
+          "feature/*": "$sanitized",
+          "hotfix/*": "$sanitized"
+        }'
+        
+        default_parent_mappings='{
+          "feature/*": "development",
+          "hotfix/*": "production",
+          "release/*": "development"
+        }'
+
+        # Use provided mappings or defaults
+        if [[ -n "$branch_mappings_input" ]] && [[ "$branch_mappings_input" != "{}" ]]; then
+          branch_mappings="$branch_mappings_input"
+          echo "Using custom branch mappings"
+        else
+          branch_mappings="$default_branch_mappings"
+          echo "Using default GitFlow branch mappings"
+        fi
+
+        if [[ -n "$parent_mappings_input" ]] && [[ "$parent_mappings_input" != "{}" ]]; then
+          parent_mappings="$parent_mappings_input"
+          echo "Using custom parent branch mappings"
+        else
+          parent_mappings="$default_parent_mappings"
+          echo "Using default GitFlow parent mappings"
+        fi
+
+        # Function to match branch against pattern
+        match_pattern() {
+          local branch="$1"
+          local pattern="$2"
+          
+          # Convert glob pattern to regex
+          local regex=$(echo "$pattern" | sed 's/\*/.*/' | sed 's/\?/./')
+          
+          if [[ "$branch" =~ ^${regex}$ ]]; then
+            return 0
+          fi
+          return 1
+        }
+
+        # Function to get environment for a branch
+        get_env_for_branch() {
+          local branch="$1"
+          local mappings="$2"
+          
+          # First try exact match
+          local env=$(echo "$mappings" | jq -r --arg b "$branch" '.[$b] // empty')
+          if [[ -n "$env" ]]; then
+            echo "$env"
+            return
+          fi
+          
+          # Then try pattern matching
+          while IFS= read -r pattern; do
+            if [[ -z "$pattern" ]]; then continue; fi
+            if match_pattern "$branch" "$pattern"; then
+              echo "$mappings" | jq -r --arg p "$pattern" '.[$p]'
+              return
+            fi
+          done < <(echo "$mappings" | jq -r 'keys[]')
+          
+          echo ""
+        }
+
+        # Function to sanitize branch name like SWA does
+        sanitize_branch() {
+          echo "$1" | sed 's/[^a-zA-Z0-9]//g' | cut -c1-20 | tr '[:upper:]' '[:lower:]'
+        }
+
+        # Determine branch
+        if [[ -n "$branch_input" ]]; then
+          branch="$branch_input"
+          echo "Using provided branch: $branch"
+        elif [[ -n "$GITHUB_REF_NAME" ]]; then
+          branch="$GITHUB_REF_NAME"
+          echo "Using GITHUB_REF_NAME: $branch"
+        elif git rev-parse --git-dir > /dev/null 2>&1; then
+          branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+          echo "Detected branch from git: $branch"
+        else
+          echo "::error::Cannot determine branch. Please provide the 'branch' input."
+          exit 1
+        fi
+        echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+        # Sanitize branch
+        sanitized=$(sanitize_branch "$branch")
+        echo "sanitized=$sanitized" >> "$GITHUB_OUTPUT"
+
+        # Resolve target environment
+        target_env=$(get_env_for_branch "$branch" "$branch_mappings")
+        
+        if [[ "$target_env" == '$sanitized' ]]; then
+          target_env="$sanitized"
+        fi
+        
+        if [[ -z "$target_env" ]]; then
+          target_env="$sanitized"
+        fi
+        
+        # Handle production special case (empty slot for SWA)
+        if [[ "$target_env" == "production" ]]; then
+          echo "target_env=" >> "$GITHUB_OUTPUT"
+          echo "is_production=true" >> "$GITHUB_OUTPUT"
+          echo "is_preview=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "target_env=$target_env" >> "$GITHUB_OUTPUT"
+          echo "is_production=false" >> "$GITHUB_OUTPUT"
+          
+          # Check if preview
+          if [[ "$branch" == feature/* ]] || [[ "$branch" == hotfix/* ]] || [[ "$branch" == release/* ]]; then
+            echo "is_preview=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_preview=false" >> "$GITHUB_OUTPUT"
+          fi
+        fi
+        echo "Resolved target environment: $target_env"
+
+        # Resolve source environment (if requested)
+        if [[ "$detect_source" == "true" ]]; then
+          source_env=$(get_env_for_branch "$branch" "$parent_mappings")
+          
+          if [[ -z "$source_env" ]]; then
+            # Fall back to git ancestry detection if in a git repo
+            if git rev-parse --git-dir > /dev/null 2>&1; then
+              parent_commit=$(git merge-base HEAD origin/develop 2>/dev/null || git merge-base HEAD origin/main 2>/dev/null || echo "")
+              if [[ -n "$parent_commit" ]]; then
+                if git merge-base --is-ancestor "$parent_commit" origin/develop 2>/dev/null; then
+                  source_env="development"
+                else
+                  source_env="production"
+                fi
+              else
+                source_env="development"
+              fi
+            else
+              source_env="development"
+            fi
+          fi
+          echo "source_env=$source_env" >> "$GITHUB_OUTPUT"
+          echo "Resolved source environment: $source_env"
+        else
+          echo "source_env=" >> "$GITHUB_OUTPUT"
+        fi
+
+        echo ""
+        echo "=== Resolution Summary ==="
+        echo "Branch: $branch"
+        echo "Sanitized: $sanitized"
+        echo "Target: $target_env"
+        echo "Source: $source_env"
