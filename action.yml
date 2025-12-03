@@ -1,5 +1,5 @@
 name: 'Resolve Azure SWA Environment'
-description: 'Determine the target deployment slot and source environment based on branch name. Supports GitFlow and custom branch-to-slot mappings.'
+description: 'Resolve deployment slot and source environment from branch name. Supports GitFlow patterns.'
 author: 'James Consulting LLC'
 branding:
   icon: 'git-branch'
