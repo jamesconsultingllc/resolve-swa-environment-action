@@ -48,7 +48,7 @@ outputs:
     description: 'Whether this is the production environment'
     value: ${{ steps.resolve.outputs.is_production }}
   sanitized-branch:
-    description: 'The sanitized branch name (alphanumeric, lowercase, max 20 chars)'
+    description: 'The sanitized branch name (alphanumeric, lowercase, max 16 chars)'
     value: ${{ steps.resolve.outputs.sanitized }}
 
 runs:
@@ -136,7 +136,7 @@ runs:
 
         # Function to sanitize branch name like SWA does
         sanitize_branch() {
-          echo "$1" | sed 's/[^a-zA-Z0-9]//g' | cut -c1-20 | tr '[:upper:]' '[:lower:]'
+          echo "$1" | sed 's/[^a-zA-Z0-9]//g' | cut -c1-16 | tr '[:upper:]' '[:lower:]'
         }
 
         # Determine branch
